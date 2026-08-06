@@ -8,7 +8,7 @@
 #define XINPUT_VID_DEFAULT 0x045EU
 #define XINPUT_PID_DEFAULT 0x028EU
 
-#define XINPUT_CONFIG_DESC_LEN 37U
+#define XINPUT_CONFIG_DESC_LEN 49U
 
 static uint16_t g_xinputVid = XINPUT_VID_DEFAULT;
 static uint16_t g_xinputPid = XINPUT_PID_DEFAULT;
@@ -20,18 +20,25 @@ static const uint8_t g_xinputDescDevice[] = {
     64,
     uint8_t(XINPUT_VID_DEFAULT & 0xFF), uint8_t(XINPUT_VID_DEFAULT >> 8),
     uint8_t(XINPUT_PID_DEFAULT & 0xFF), uint8_t(XINPUT_PID_DEFAULT >> 8),
-    0x00, 0x01,
-    1, 2, 3
+    0x14, 0x01,
+    1, 2, 3,
+    1
 };
 
 static const uint8_t g_xinputDescConfig[] = {
     0x09, TUSB_DESC_CONFIGURATION,
     XINPUT_CONFIG_DESC_LEN & 0xFF, (XINPUT_CONFIG_DESC_LEN >> 8) & 0xFF,
-    1, 1, 0, 0xE0, 50 / 2U,
+    1, 1, 0, 0xA0, 250 / 2U,
 
+    // Interface descriptor — control data
     9, TUSB_DESC_INTERFACE, 0, 0, 2, 0xFF, 0x5D, 0x01, 0,
-    5, TUSB_DESC_CS_INTERFACE, 0x00, 0x5D, 0x01,
+    // Type-0x21 vendor-specific descriptor (golden Xbox 360 reference)
+    0x11, 0x21, 0x00, 0x01, 0x01, 0x25,
+    0x81, 0x14, 0x00, 0x00, 0x00, 0x00, 0x13,
+    0x01, 0x08, 0x00, 0x00,
+    // Endpoint IN — control surface send (interrupt, 32B, 4ms)
     7, TUSB_DESC_ENDPOINT, 0x81, TUSB_XFER_INTERRUPT, 32 & 0xFF, (32 >> 8) & 0xFF, 4,
+    // Endpoint OUT — control surface receive (interrupt, 32B, 8ms)
     7, TUSB_DESC_ENDPOINT, 0x01, TUSB_XFER_INTERRUPT, 32 & 0xFF, (32 >> 8) & 0xFF, 8
 };
 

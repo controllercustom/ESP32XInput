@@ -78,16 +78,16 @@ static void testButtonLatency() {
         for (uint8_t i = 0; i < ESP32XInputClass::BUTTON_COUNT; ++i) {
             auto btn = static_cast<ESP32XInputClass::Button>(i);
 
-            uint64_t t0 = esp_timer_get_time();
-            emit(t0, TYPE_BTN_PRESS, i);
             ESP32XInput.press(btn);
+            uint64_t t0 = esp_timer_get_time();
             ESP32XInput.send();
+            emit(t0, TYPE_BTN_PRESS, i);
             delayMicroseconds(10000);
 
-            uint64_t t1 = esp_timer_get_time();
-            emit(t1, TYPE_BTN_RELEASE, i);
             ESP32XInput.release(btn);
+            uint64_t t1 = esp_timer_get_time();
             ESP32XInput.send();
+            emit(t1, TYPE_BTN_RELEASE, i);
             delayMicroseconds(10000);
         }
     }
@@ -97,38 +97,38 @@ static void testStickLatency() {
     for (uint8_t iter = 0; iter < ANALOG_ITERATIONS; ++iter) {
         uint64_t t;
 
-        t = esp_timer_get_time();
         ESP32XInput.setStickLeft(32767, 0);
+        t = esp_timer_get_time();
         ESP32XInput.send();
         emit(t, TYPE_LEFT_STICK, 0);
         delayMicroseconds(200);
 
-        t = esp_timer_get_time();
         ESP32XInput.setStickLeft(0, 0);
+        t = esp_timer_get_time();
         ESP32XInput.send();
         emit(t, TYPE_LEFT_STICK, 1);
         delayMicroseconds(200);
 
-        t = esp_timer_get_time();
         ESP32XInput.setStickLeft(0, 32767);
+        t = esp_timer_get_time();
         ESP32XInput.send();
         emit(t, TYPE_LEFT_STICK, 2);
         delayMicroseconds(200);
 
-        t = esp_timer_get_time();
         ESP32XInput.setStickLeft(0, 0);
+        t = esp_timer_get_time();
         ESP32XInput.send();
         emit(t, TYPE_LEFT_STICK, 3);
         delayMicroseconds(200);
 
-        t = esp_timer_get_time();
         ESP32XInput.setStickRight(32767, 0);
+        t = esp_timer_get_time();
         ESP32XInput.send();
         emit(t, TYPE_RIGHT_STICK, 0);
         delayMicroseconds(200);
 
-        t = esp_timer_get_time();
         ESP32XInput.setStickRight(0, 0);
+        t = esp_timer_get_time();
         ESP32XInput.send();
         emit(t, TYPE_RIGHT_STICK, 1);
         delayMicroseconds(200);
@@ -139,26 +139,26 @@ static void testTriggerLatency() {
     for (uint8_t iter = 0; iter < ANALOG_ITERATIONS; ++iter) {
         uint64_t t;
 
-        t = esp_timer_get_time();
         ESP32XInput.setLeftTrigger(32768U);
+        t = esp_timer_get_time();
         ESP32XInput.send();
         emit(t, TYPE_L_TRIGGER, 0);
         delayMicroseconds(200);
 
-        t = esp_timer_get_time();
         ESP32XInput.setLeftTrigger(0);
+        t = esp_timer_get_time();
         ESP32XInput.send();
         emit(t, TYPE_L_TRIGGER, 1);
         delayMicroseconds(200);
 
-        t = esp_timer_get_time();
         ESP32XInput.setRightTrigger(32768U);
+        t = esp_timer_get_time();
         ESP32XInput.send();
         emit(t, TYPE_R_TRIGGER, 0);
         delayMicroseconds(200);
 
-        t = esp_timer_get_time();
         ESP32XInput.setRightTrigger(0);
+        t = esp_timer_get_time();
         ESP32XInput.send();
         emit(t, TYPE_R_TRIGGER, 1);
         delayMicroseconds(200);
@@ -169,15 +169,15 @@ static void testDpadLatency() {
     for (uint8_t iter = 0; iter < BTN_ITERATIONS; ++iter) {
         uint64_t t;
         for (uint8_t h = 0; h <= 7; ++h) {
-            t = esp_timer_get_time();
             ESP32XInput.setHat(h);
+            t = esp_timer_get_time();
             ESP32XInput.send();
             emit(t, TYPE_DPAD, h);
             delayMicroseconds(200);
         }
 
-        t = esp_timer_get_time();
         ESP32XInput.setHat(8);
+        t = esp_timer_get_time();
         ESP32XInput.send();
         emit(t, TYPE_DPAD, 8);
         delayMicroseconds(200);

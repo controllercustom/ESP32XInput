@@ -100,20 +100,56 @@ def read_uart(uart_path, out_queue, stop_event):
         print(f"UART error: {e}", file=sys.stderr)
 
 
+def read_uart_from_handle(ser, out_queue, stop_event):
+    """Read TS: lines from an already-opened serial handle (avoids double-opening /dev/ttyUSB0)."""
+    try:
+        while not stop_event.is_set():
+            line = ser.readline()
+            if not line:
+                continue
+            text = line.decode('utf-8', errors='replace').strip()
+
+            if text.startswith("TS:"):
+                parts = text[3:].split(":")
+                if len(parts) == 4:
+                    try:
+                        out_queue.put(UARTEvent(
+                            ts_ns=int(parts[0]) * 1000,
+                            seq=int(parts[1]),
+                            type=int(parts[2]),
+                            value=int(parts[3]),
+                        ))
+                    except ValueError:
+                        pass
+            elif text.startswith("BTN:"):
+                print(f"  Button: {text[4:]}", file=sys.stderr)
+            elif text.startswith("RPT:"):
+                print(f"  Report: {text[4:]}", file=sys.stderr)
+            elif text == "READY":
+                print("  ESP32 ready", file=sys.stderr)
+    except Exception as e:
+        print(f"UART error: {e}", file=sys.stderr)
+
+
 def read_evdev(evdev_path, out_queue, stop_event):
-    """Read gamepad events from evdev."""
+    """Read gamepad events from evdev using non-blocking poll loop."""
     try:
         dev = InputDevice(evdev_path)
         print(f"  Device: {dev.name}", file=sys.stderr)
 
-        for event in dev.read_loop():
-            if stop_event.is_set():
-                break
-            if event.type in INTERESTING_CODES:
-                codes = INTERESTING_CODES[event.type]
-                if event.code in codes:
-                    ts_ns = int(event.timestamp() * 1e9)
-                    out_queue.put(EvdevEvent(ts_ns, event.type, event.code, event.value))
+        import select
+        while not stop_event.is_set():
+            r, _, _ = select.select([dev], [], [], 0.5)
+            if not r:
+                continue
+            for event in dev.read():
+                if stop_event.is_set():
+                    break
+                if event.type in INTERESTING_CODES:
+                    codes = INTERESTING_CODES[event.type]
+                    if event.code in codes:
+                        ts_ns = int(event.timestamp() * 1e9)
+                        out_queue.put(EvdevEvent(ts_ns, event.type, event.code, event.value))
     except Exception as e:
         print(f"evdev error: {e}", file=sys.stderr)
 
@@ -198,7 +234,7 @@ def main():
 
     if not args.evdev:
         path, dev = find_gamepad()
-        if path is None:
+        if path is None or dev is None:
             print("ERROR: No gamepad detected. Connect ESP32XInput device and specify --evdev.")
             sys.exit(1)
         args.evdev = path
@@ -219,21 +255,20 @@ def main():
     else:
         print(f"  Time offset: {offset_ns/1e6:.1f} ms", file=sys.stderr)
 
-    # Start collection threads
+    # Start collection threads — pass the already-open serial handle to avoid double-opening /dev/ttyUSB0.
     event_queue = queue.Queue()
     stop_event = threading.Event()
 
-    uart_thread = threading.Thread(target=read_uart, args=(args.uart, event_queue, stop_event), daemon=True)
+    uart_thread = threading.Thread(target=read_uart_from_handle, args=(ser, event_queue, stop_event), daemon=True)
     evdev_thread = threading.Thread(target=read_evdev, args=(args.evdev, event_queue, stop_event), daemon=True)
 
     uart_thread.start()
     evdev_thread.start()
     time.sleep(0.5)
 
-    # Send START
+    # Send START on the same handle that read_uart will consume from after this write.
     ser.write(b"START\n")
     print("  Sent START command", file=sys.stderr)
-    ser.close()
 
     time.sleep(args.duration)
     stop_event.set()

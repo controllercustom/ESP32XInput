@@ -12,6 +12,8 @@
 class ESP32XInputClass {
 public:
     struct __attribute__((packed)) XInputReport {
+        uint8_t  bMessageType;      // 0x00 — Xbox 360 message type (required by xpad driver)
+        uint8_t  bMessageSize;      // 0x14 — report length
         uint16_t wButtons;
         uint8_t  bLeftTrigger;
         uint8_t  bRightTrigger;
@@ -20,7 +22,7 @@ public:
         int16_t  sThumbRX;
         int16_t  sThumbRY;
         uint32_t dwReserved0;
-        uint32_t dwReserved1;
+        uint16_t wReserved1;
     };
 
     enum Button : uint8_t {
@@ -35,11 +37,11 @@ public:
         LEFT_SHOULDER,
         RIGHT_SHOULDER,
         XBOX,
-        A,
+        A = 12,
         B,
         X,
         Y,
-        BUTTON_COUNT = 15U
+        BUTTON_COUNT = 16U
     };
 
     void begin(uint16_t vid = 0x045E, uint16_t pid = 0x028E);
@@ -70,6 +72,7 @@ public:
     bool ready();
     void releaseAll();
     void pollRumble();
+    const XInputReport& getReport() const;
 
 private:
     static const uint8_t XINPUT_INTERFACE_ID = 0U;
@@ -80,13 +83,16 @@ private:
     void _sendReport();
     bool _isDirty() const { return _dirtyFlag.load(); }
     void _markDirty() { _dirtyFlag.store(true); }
+    bool _canSend() const;
 
-    XInputReport _report{};
+    XInputReport _report{0x00, 0x14};
     volatile std::atomic<bool> _dirtyFlag{false};
     
     uint32_t _pollIntervalMs = 8U;
     esp_timer_handle_t _timerHandle = nullptr;
     bool _connected = false;
+    mutable volatile bool _usbReady = false;
+    mutable unsigned long _mountedAt = 0;
 
     RumbleCallback _onRumbleCb = nullptr;
     LedCallback    _onLedCb   = nullptr;

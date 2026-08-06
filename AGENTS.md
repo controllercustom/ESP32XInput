@@ -1,7 +1,7 @@
 # ESP32XInput — Agent Instructions
 
 ## Build and Compile
-- **Toolchain**: Arduino CLI only (no PlatformIO). Core: `esp32:esp32` v3.3.x+.
+- **Toolchain**: Arduino CLI. Core: `esp32:esp32` v3.3.x+.
 - **FQBN for S3**: `esp32:esp32:esp32s3`. Must append `USBMode=default` to enable USB-OTG (TinyUSB) mode. For UART upload when USB-OTG is active, also append `UploadMode=default`. Full FQBN: `"esp32:esp32:esp32s3:USBMode=default,UploadMode=default"`.
 
 ### Library Installation (Required Before Any Compile)
@@ -44,9 +44,9 @@ ESP32XInput.releaseAll();
 ```
 
 ## USB Descriptor Implementation
-Descriptors are built as `static const uint8_t` arrays in `xinput_descriptor.h` using raw bytes (no TinyUSB macros). Config descriptor length is hardcoded as `XINPUT_CONFIG_DESC_LEN` (37 bytes: 9+9+5+7+7). `buildDescriptors()` registers the custom interface via `tinyusb_enable_interface(USB_INTERFACE_CUSTOM, ...)`.
+Descriptors are built as `static const uint8_t` arrays in `xinput_descriptor.h` using raw bytes (no TinyUSB macros). Config descriptor length is hardcoded as `XINPUT_CONFIG_DESC_LEN` (49 bytes: 9+9+17+7+7). `buildDescriptors()` registers the custom interface via `tinyusb_enable_interface(USB_INTERFACE_CUSTOM, 40, tusb_xinput_load_descriptor)` — size parameter must be **40** (interface + vendor-specific descriptor + 2 endpoints = 9+17+7+7).
 
-The load descriptor callback (`tusb_xinput_load_descriptor`) writes the XInput-specific descriptors (interface 0xFF/0x5D/0x01 + CS_INTERFACE type 0x24 + 2 interrupt endpoints).
+The load descriptor callback (`tusb_xinput_load_descriptor`) writes the XInput-specific descriptors: interface 0xFF/0x5D/0x01, type-0x21 vendor-specific descriptor (17 bytes matching golden Xbox 360 reference), and 2 interrupt endpoints.
 
 Device descriptor (VID/PID, class=0xFF, etc.) is set via `tinyusb_device_config_t` passed to `tinyusb_init()`. The XInput interface is registered before `tinyusb_init()` is called.
 
@@ -57,14 +57,103 @@ The IN endpoint transfer uses `tud_vendor_n_write()` — the TinyUSB vendor clas
 - **VID/PID**: `045E:028E` (Microsoft Xbox 360) by default, configurable.
 - **Report size**: 20 bytes packed.
 - **Interface class**: 0xFF/0x5D/0x01 (vendor-specific, Xbox 360 protocol).
-- **CS_INTERFACE descriptor type 0x24**: Required for Windows XInput driver recognition.
+- **Vendor-specific descriptor type 0x21** (CS_INTERFACE, 17 bytes): Required for Windows XInput driver recognition — do not remove it. Payload matches golden Xbox 360 reference: `0x00, 0x5D, 0x01` in first three data bytes.
 - **IN ep 0x81** (interrupt, 32B, 4ms), **OUT ep 0x01** (interrupt, 32B, 8ms).
 
 ## Project Structure
 - **Library source**: `src/ESP32XInput.h`, `src/ESP32XInput.cpp`, `src/xinput_descriptor.h`
-- **Examples** (all under `examples/`): BasicButtons, BasicGamepad, JoystickTest, FullController, RumbleFeedback
+- **Examples** (all under `examples/`): BasicButtons, BasicGamepad, JoystickTest, FullController, RumbleFeedback, AutoCycle
 - **Tests** (under `tests/`): TestBasicFunctionality, LatencyBenchmark
 - **Scripts** (under `scripts/`): run_tests.py, latency_capture.py
+
+## Debugging Notes — USBMode=default Pitfalls
+
+### Serial Console Not Available at Runtime
+With `USBMode=default`, the ESP32-S3 enumerates as a pure vendor-class XInput device. There is **no CDC-ACM serial port** on USB after boot — all `Serial.println()` / `Serial.printf()` calls go nowhere. Use `Serial0` (hardware UART via CP210x bridge at `/dev/ttyUSB0`) for debug output:
+```cpp
+// WRONG — goes to non-existent CDC console
+Serial.begin(115200);
+Serial.println("hello");
+
+// CORRECT — hardware UART on GPIO43/GPIO44 (CP210x bridge)
+Serial0.begin(115200);
+Serial0.printf("TS:%lld\n", esp_timer_get_time());
+```
+
+### `esp_timer_get_time()` Returns `int64_t` — Use `%lld`, Not `%lu`
+On ESP32-S3 (ARM), `unsigned long` is 32-bit. Using `%lu` with `esp_timer_get_time()` truncates the timer value, causing timestamp corruption that manifests as sudden resets to small numbers mid-run:
+```cpp
+// WRONG — %lu truncates int64_t → corrupted timestamps after ~71min uptime or heavy call stacks
+Serial0.printf("TS:%lu\n", esp_timer_get_time());
+
+// CORRECT — %lld prints full 64-bit value
+Serial0.printf("TS:%lld\n", esp_timer_get_time());
+```
+
+### USB Packet Capture via usbmon (Works on Linux)
+`usbmon` + `tcpdump` **does** capture XInput interrupt-IN payloads — they appear as `Leftover Capture Data` in tshark verbose output (`tshark -V`). The kernel's `xpad` driver does NOT consume URBs before usbmon intercepts them on this system. Three verification methods work:
+
+1. **usbmon** (tcpdump → pcap) — captures raw interrupt-IN payloads directly from the bus, no external hardware needed
+2. **evdev** (`/dev/input/event5`) — reads what xpad decoded from USB IN endpoint transfers
+3. **External USB analyzer (Cynthon)** — alternative for systems where usbmon doesn't expose payload data
+
+### usbmon Capture + Verification Workflow
+For end-to-end verification of XInput report payloads: run AutoCycle sketch, start jstest to keep host polling the IN endpoint, then capture with tcpdump on the correct bus. Parse pcap with tshark verbose output → Python regex on `Leftover Capture Data` lines.
+
+```bash
+# Find which bus your device is on (Bus 001 in this example)
+lsusb | grep -i microsoft
+
+# Start jstest to keep IN endpoint active, then capture for ~35s
+jstest /dev/input/js0 > /tmp/jstest_output.txt &
+sudo timeout 35 tcpdump -i usbmon1 -w /tmp/xinput_capture.pcap
+kill %1
+
+# Decode payloads from verbose output
+tshark -r /tmp/xinput_capture.pcap -V | grep "Leftover Capture Data" > /tmp/leftover_data.txt
+```
+
+Phase markers (wButtons=0xFFF1) bracket each phase transition — strict marker requires all sticks/triggers zero.
+
+**Verified results**: 4569 valid XInput interrupt-IN frames captured over ~30s across multiple complete cycles. All phases P0-P8 verified correct:
+- Header validation: **all 4569 frames** have bMessageType=0x00, bMessageSize=0x14 ✓
+- Button cycling: all 9 main buttons (START, BACK, L/R thumb, LB/RB, XB, A_BUT, XBOX) cycled correctly per cycle
+- D-pad sweep: all 8 cardinal + diagonal directions present in wButtons bits 0-3 ([1,2,4,5,6,8,9,10]) ✓
+- Stick sweeps: full ±29491 range on both axes with zero cross-contamination between sticks ✓
+- Trigger ramps: exact uint8 values [0, 31, 63, 127, 191, 255] confirmed (formula: `value * 255 / 32768`) ✓
+- P7a all-input burst: wButtons=0xF7F1, L(-16384,-16384), R(+16384,+16384), LT/RT=127 — identical across cycles ✓
+- P7b A-toggle rapid-fire: 24 PRESS↔RELEASE transitions per cycle (51 USB polls, ~10ms ESP iteration) with zero field contamination ✓
+- P7c stress recovery: clean all-zero reports after rapid toggling ✓
+
+### Trigger Scaling Formula Confirmed
+`ESP32XInput.cpp`: `value * 255 / 32768`. NOT `/128`. Produces uint8_t values `[0, 31, 63, 127, 191, 255]` for the ramp table.
+
+### evdev Verification (Ground Truth)
+For validating XInput output against expected stimulus: capture via Python `evdev` library reading `/dev/input/event5`. The kernel's `xpad` driver translates the 20-byte XInput reports into standard Linux input events. Key mappings verified on this host:
+- **ABS_X** (code 0): left stick X, range ~±32768 via evdev
+- **ABS_Y** (code 1): left stick Y (inverted by xpad)
+- **ABS_Z** (code 2): L-trigger as uint8_t (xpad scales from uint8 in report)
+- **ABS_RX** (code 3): right stick X
+- **ABS_RY** (code 4): right stick Y (inverted by xpad)
+- **ABS_RZ** (code 5): R-trigger as uint8_t
+- **ABS_HAT0X/HAT0Y** (codes 16/17): d-pad (-1, 0, +1 axes; both zero = centered)
+- **BTN_A/B/X/Y/LB/RB/etc.** (codes 304+): button press/release events
+
+## Cross-Repo Comparison: ESP32ds4 vs ESP32XInput
+
+| Aspect | ESP32ds4 (HID gamepad) | ESP32XInput (vendor-class XInput) |
+|---|---|---|
+| USB stack path | `Adafruit_TinyUSB.h` → standard HID driver (`hid-generic`) | Raw TinyUSB vendor class → kernel `xpad` driver |
+| Report size | 64 bytes (incl. report ID byte) | 20 bytes packed struct, no report ID |
+| Send strategy | Always-send every frame (matches real DS4 behavior) | Dirty-flag + auto-poll timer for efficiency |
+| Stick range API | ±127 → maps to uint8_t internally | Full int16_t (-32768..+32767) natively |
+| Trigger range API | 0-32768 → scales to uint8_t (0-255) | Direct uint8_t per XInput spec |
+| Feature reports | Responds to GET_REPORT for IDs 0x02/0x12/0xA3/0x81 | No feature report mechanism (vendor class doesn't define it) |
+| Touchpad support | Yes, 2-finger with state+coords encoding | Not applicable — XInput protocol has no touchpad field |
+| USB capture visibility | Interrupt-IN visible to usbmon/tcpdump (standard HID path) | **Visible** via `Leftover Capture Data` in tshark -V output ✓ |
+
+### Key Takeaway for Verification
+Three verification methods are available on Linux: **(1)** usbmon pcap captures raw XInput report payloads directly from the bus, **(2)** evdev events show what xpad decoded (correlate with Serial0 telemetry by timestamp), and **(3)** external USB analyzer as fallback. The usbmon method is simplest — no extra hardware or clock synchronization needed.
 
 ## End-to-End Test Suite
 
@@ -108,7 +197,7 @@ sudo python3 scripts/run_tests.py --uart /dev/ttyUSB0 --evdev /dev/input/event5 
 
 ## USB Protocol Details (Critical for Changes)
 - Vendor class: 0xFF/0x5D/0x01 on interface 0 only.
-- Class-specific descriptor type **0x24** (CS_INTERFACE) between interface and endpoint descriptors is **required** for Windows XInput driver recognition — do not remove it. Payload: `0x00, 0x5D, 0x01`.
+- Class-specific descriptor type **0x21** (vendor-specific, 17 bytes) between interface and endpoint descriptors is **required** for Windows XInput driver recognition — do not remove it. Payload matches golden Xbox 360 reference: `0x00, 0x5D, 0x01` in first three data bytes.
 - IN ep 0x81 (interrupt, 32B, 4ms), OUT ep 0x01 (interrupt, 32B, 8ms).
 - Report struct (`XInputReport`) must be exactly 20 bytes packed.
 - Device descriptor class/subclass/protocol must be 0xFF/0xFF/0xFF.

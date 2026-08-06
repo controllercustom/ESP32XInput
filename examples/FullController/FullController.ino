@@ -56,6 +56,8 @@ void setup() {
 }
 
 void loop() {
+  ESP32XInput.pollRumble();
+
   for (size_t i = 0; i < sizeof(btn_pins) / sizeof(btn_pins[0]); i++) {
     ESP32XInput.setButton(btn_pins[i].btn, !digitalRead(btn_pins[i].pin));
   }

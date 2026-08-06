@@ -87,6 +87,7 @@ void setup() {
 }
 
 void loop() {
+  ESP32XInput.pollRumble();
   while (Serial.available() > 0) {
     char c = Serial.read();
     if (c == '\n' || c == '\r') {

@@ -3,3 +3,5 @@ build/
 *.elf
 *.map
 ESP32XInput
+mydocs/
+results.json

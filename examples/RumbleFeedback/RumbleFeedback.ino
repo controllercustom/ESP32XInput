@@ -24,6 +24,8 @@ void setup() {
 }
 
 void loop() {
+    ESP32XInput.pollRumble();
+
     static uint8_t buttonIdx = 0;
     const char* names[] = {"A", "B", "X", "Y"};
     
