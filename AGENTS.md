@@ -52,6 +52,15 @@ Device descriptor (VID/PID, class=0xFF, etc.) is set via `tinyusb_device_config_
 
 The IN endpoint transfer uses `tud_vendor_n_write()` — the TinyUSB vendor class driver automatically matches interfaces with `bInterfaceClass=0xFF`. The OUT endpoint for rumble/LED is polled via `tud_vendor_n_available()` / `tud_vendor_n_read()`.
 
+## Vendor Control Requests (Xbox 360 "Magic Message")
+
+Linux `xpad` (and SDL/Windows XInput) sends a vendor IN control request during init on EP0: `bmRequestType=0xC1` (VENDOR|IN|INTERFACE), `bRequest=0x01`. Without a handler TinyUSB STALLs it and the kernel logs `unable to receive magic message: -32` (3× per connect). Respond correctly in `ESP32XInput.cpp`:
+- **`wValue=0x0100`** (get-state, 20B): return the current 20-byte `XInputReport` — the kernel ignores content, SDL parses bytes 2-13 as buttons/sticks/triggers.
+- **`wValue=0x0000`** (vibration caps, 8B): return `{0x00, 0x08, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00}` (both motors full-range) — used by SDL, not xpad.
+- Anything else → `return false` (STALL).
+
+**Override hook**: the ESP32 core's `tud_vendor_control_xfer_cb()` (in `esp32-hal-tinyusb.c`) is a **strong** symbol that handles WebUSB/MS-OS then forwards to the **weak** `tinyusb_vendor_control_request_cb()`. Override that weak hook (declared with `extern "C"` since it's not in any header), NOT `tud_vendor_control_xfer_cb` (would be a multiple-definition link error). `tud_control_xfer()` response buffers must be `static` (transfer completes asynchronously); return `true` for non-`CONTROL_STAGE_SETUP` stages.
+
 ## Key Technical Details
 
 - **VID/PID**: `045E:028E` (Microsoft Xbox 360) by default, configurable.
@@ -115,15 +124,28 @@ tshark -r /tmp/xinput_capture.pcap -V | grep "Leftover Capture Data" > /tmp/left
 
 Phase markers (wButtons=0xFFF1) bracket each phase transition — strict marker requires all sticks/triggers zero.
 
-**Verified results**: 4569 valid XInput interrupt-IN frames captured over ~30s across multiple complete cycles. All phases P0-P8 verified correct:
-- Header validation: **all 4569 frames** have bMessageType=0x00, bMessageSize=0x14 ✓
-- Button cycling: all 9 main buttons (START, BACK, L/R thumb, LB/RB, XB, A_BUT, XBOX) cycled correctly per cycle
-- D-pad sweep: all 8 cardinal + diagonal directions present in wButtons bits 0-3 ([1,2,4,5,6,8,9,10]) ✓
-- Stick sweeps: full ±29491 range on both axes with zero cross-contamination between sticks ✓
-- Trigger ramps: exact uint8 values [0, 31, 63, 127, 191, 255] confirmed (formula: `value * 255 / 32768`) ✓
-- P7a all-input burst: wButtons=0xF7F1, L(-16384,-16384), R(+16384,+16384), LT/RT=127 — identical across cycles ✓
-- P7b A-toggle rapid-fire: 24 PRESS↔RELEASE transitions per cycle (51 USB polls, ~10ms ESP iteration) with zero field contamination ✓
-- P7c stress recovery: clean all-zero reports after rapid toggling ✓
+**Verified results (baseline, 2026-08-06)**: **5349 valid XInput interrupt-IN frames** captured over 35s across **12 complete cycles** (13 marker-delimited phase groups per cycle, P0→P8). Zero issues found; all phases exact-value validated:
+- Header validation: **all 5349 frames** have bMessageType=0x00, bMessageSize=0x14 ✓
+- Phase markers: 143 markers (wButtons=0xFFF1), **all strict** (all sticks/triggers zero) ✓
+- P1 button cycling: all **11** main buttons (START, BACK, LTHUMB, RTHUMB, LB, RB, XBOX, A, B, X, Y) present and ordered across all 12 cycles ✓
+- P2 d-pad sweep: all **8 directions** present in wButtons bits 0-3, ordered subsequence 0→7 verified every cycle ✓ (note: hat-to-bits via `hatToButtons[]` in `ESP32XInput.cpp:143-152`: UP=0x01, UP_RIGHT=0x09, RIGHT=0x08, DOWN_RIGHT=0x0A, DOWN=0x02, DOWN_LEFT=0x06, LEFT=0x04, UP_LEFT=0x05; centered=8 produces 0x0000, indistinguishable from reset frames)
+- P3/P4 stick sweeps: full ±29491 linear range on both axes, ±32768 extreme corner, all circle points (±9830/±14745 quadrants) — zero cross-contamination between sticks, triggers zero throughout ✓
+- P5/P6 trigger ramps: exact uint8 values [0, 31, 63, 127, 191, 255, 127, 0] confirmed (formula: `value * 255 / 32768`) ✓
+- P7a all-input burst: wButtons=0xF7F1, L(-16384,-16384), R(+16384,+16384), LT/RT=127 — identical across cycles (4 burst frames each) ✓
+- P7b A-toggle rapid-fire: **24 PRESS↔RELEASE transitions per cycle** with zero field contamination ✓
+- P0/P7c/P8 idle: strict all-zero reports throughout (624/168/624 frames across 12 cycles) ✓
+
+Caveat for pcap analysis: `releaseAll()` (ESP32XInput.cpp:263) memsets the report and sends immediately, so a zero reset frame appears at the start of every test iteration. Treat interleaved zero frames as reset frames, not contaminations; validate phase values as ordered subsequences rather than exact sequences.
+
+### MGX Passthrough Verified (2026-08-06)
+The MGX (MAGIC-X) device is **not** a raw report passthrough — it re-encodes ESP32 reports using its own XInput descriptor (iProduct `MAGIC-X`, 64B interrupt EPs, IN interval 1ms). Capture: `/tmp/xinput_capture_mgx.pcap` → 68018 packets, 0 dropped → 34003 payload frames, 74 unique patterns. Verified with `scripts/verify_mgx_passthrough.py` → **PASS** (markers=0xF7F1, all 11 P1 buttons, 8 d-pad directions, trigger ramps, P7a burst, 755 A-toggles).
+
+Key deltas vs direct connection:
+- **Marker**: `0xF7F1` (bit 12 SET still set) instead of `0xFFF1` — MGX clears bits 12-15 in the hat/misc nibble that ESP32 sets.
+- **Stick re-scaling by MGX calibration**: ESP32 ±29491 → MGX ±30315; ±9830→±14248, ±14745→±14250, ±16384→±16049/16050; LY/RY idle center = **-1** (not 0). LX/RX stay bipolar.
+- **Dominant frame** (25584×): `btn=0x0000 LT=0 RT=0 LX=0 LY=-1 RX=0 RY=-1`; marker frames (1127×): `0xF7F1`; P7a burst (312×): `0xF7F1 LT=RT=127` with LX=-16050 LY=-16050 RX=16049 RY=16049.
+- **evdev ground truth** (`/tmp/jstest_mgx_output.txt`): stick sweeps (±8857/±14248/±19640/±30424/±32767), trigger values (0/16513/24770/32767 ≈ uint8 0/128/193/255), and button marker burst all decoded by xpad through MGX ✓.
+- Capture artifacts archived in `mydocs/`: `esp32_direct_usbmon1.pcap`/`esp32_through_mgx_usbmon1.pcap` + matching `*_leftover_data.txt`.
 
 ### Trigger Scaling Formula Confirmed
 `ESP32XInput.cpp`: `value * 255 / 32768`. NOT `/128`. Produces uint8_t values `[0, 31, 63, 127, 191, 255]` for the ramp table.

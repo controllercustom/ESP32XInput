@@ -43,6 +43,43 @@ uint16_t tusb_xinput_load_descriptor(uint8_t *dst, uint8_t *itf) {
     return sizeof(desc);
 }
 
+// Handle vendor-type control requests on EP0.
+//
+// The Linux xpad driver (and SDL/Windows XInput) sends a vendor IN request at
+// init time — the Xbox 360 "magic message": bmRequestType=0xC1 (VENDOR | IN |
+// INTERFACE), bRequest=0x01. Without a handler the request is STALLed and the
+// kernel logs "unable to receive magic message: -32". A real pad answers with:
+//   - wValue=0x0100: current state as a 20-byte XInput report
+//   - wValue=0x0000: 8-byte output-report (vibration capabilities)
+//
+// The ESP32 core's tud_vendor_control_xfer_cb() forwards non-WebUSB vendor
+// requests to the weak tinyusb_vendor_control_request_cb() hook, which we
+// override here (declared extern "C" to match the core's C linkage).
+extern "C" bool tinyusb_vendor_control_request_cb(uint8_t rhport, uint8_t stage,
+                                                  tusb_control_request_t const *request);
+
+extern "C" bool tinyusb_vendor_control_request_cb(uint8_t rhport, uint8_t stage,
+                                                  tusb_control_request_t const *request) {
+    if (stage != CONTROL_STAGE_SETUP) return true;
+
+    if (request->bmRequestType_bit.recipient == TUSB_REQ_RCPT_INTERFACE &&
+        request->bmRequestType_bit.type == TUSB_REQ_TYPE_VENDOR &&
+        request->bmRequestType_bit.direction == TUSB_DIR_IN &&
+        request->bRequest == 0x01) {
+
+        if (request->wValue == 0x0100) {
+            static uint8_t buf[XINPUT_REPORT_SIZE];
+            memcpy(buf, &ESP32XInput.getReport(), sizeof(buf));
+            return tud_control_xfer(rhport, request, buf, sizeof(buf));
+        }
+        if (request->wValue == 0x0000) {
+            static uint8_t caps[8] = {0x00, 0x08, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00};
+            return tud_control_xfer(rhport, request, caps, sizeof(caps));
+        }
+    }
+    return false;
+}
+
 void ESP32XInputClass::begin(uint16_t vid, uint16_t pid) {
     buildDescriptors(vid, pid);
 
